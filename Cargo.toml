@@ -83,6 +83,7 @@ spirv = "0.3"
 fern = { version = "0.6", features = ["colored"] }
 num_enum = "0.7"
 num-derive = "0.4"
+smallvec = "1.13.2"
 num-traits = { version = "0.2", default-features = false, features = ["i128"] }
 specta = { git = "https://github.com/0hypercube/specta.git", features = [
 	"glam",

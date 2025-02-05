@@ -679,7 +679,7 @@ impl PathToolData {
 		};
 
 		let handle_lengths = if equidistant { None } else { self.opposing_handle_lengths.take() };
-		shape_editor.move_selected_points(handle_lengths, document, snapped_delta, equidistant, responses, true);
+		shape_editor.move_selected_points(handle_lengths, document, snapped_delta, responses, true);
 		self.previous_mouse_position += document_to_viewport.inverse().transform_vector2(snapped_delta);
 	}
 }
@@ -1105,7 +1105,7 @@ impl Fsm for PathToolFsmState {
 			}
 			(_, PathToolMessage::PointerMove { .. }) => self,
 			(_, PathToolMessage::NudgeSelectedPoints { delta_x, delta_y }) => {
-				shape_editor.move_selected_points(tool_data.opposing_handle_lengths.take(), document, (delta_x, delta_y).into(), true, responses, false);
+				shape_editor.move_selected_points(tool_data.opposing_handle_lengths.take(), document, (delta_x, delta_y).into(), responses, false);
 
 				PathToolFsmState::Ready
 			}

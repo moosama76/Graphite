@@ -757,39 +757,24 @@ impl ShapeState {
 		}
 	}
 
-	/// Move the selected points by dragging the mouse.
-	pub fn move_selected_points(
-		&self,
-		handle_lengths: Option<OpposingHandleLengths>,
-		document: &DocumentMessageHandler,
-		delta: DVec2,
-		equidistant: bool,
-		responses: &mut VecDeque<Message>,
-		in_viewport_space: bool,
-	) {
+	pub fn move_selected_points(&self, handle_lengths: Option<OpposingHandleLengths>, document: &DocumentMessageHandler, delta: DVec2, responses: &mut VecDeque<Message>, in_viewport_space: bool) {
 		for (&layer, state) in &self.selected_shape_state {
 			let Some(vector_data) = document.network_interface.compute_modified_vector(layer) else { continue };
+			let opposing_handles = handle_lengths.as_ref().and_then(|hl| hl.get(&layer));
 
-			let opposing_handles = handle_lengths.as_ref().and_then(|handle_lengths| handle_lengths.get(&layer));
-
-			let transform_to_viewport_space = document.metadata().transform_to_viewport(layer);
-			let transform_to_document_space = document.metadata().transform_to_document(layer);
 			let delta_transform = if in_viewport_space {
-				transform_to_viewport_space
+				document.metadata().transform_to_viewport(layer)
 			} else {
-				DAffine2::from_angle(document.document_ptz.tilt()) * transform_to_document_space
+				DAffine2::from_angle(document.document_ptz.tilt()) * document.metadata().transform_to_document(layer)
 			};
-			let delta = delta_transform.inverse().transform_vector2(delta);
+			let inverse_delta_transform = delta_transform.inverse();
+			let delta = inverse_delta_transform.transform_vector2(delta);
 
-			for &point in state.selected_points.iter() {
-				let handle = match point {
-					ManipulatorPointId::Anchor(point) => {
-						self.move_anchor(point, &vector_data, delta, layer, Some(state), responses);
-						continue;
-					}
-					ManipulatorPointId::PrimaryHandle(segment) => HandleId::primary(segment),
-					ManipulatorPointId::EndHandle(segment) => HandleId::end(segment),
-				};
+			for &point in &state.selected_points {
+				if let ManipulatorPointId::Anchor(anchor_id) = point {
+					self.move_anchor(anchor_id, &vector_data, delta, layer, Some(state), responses);
+					continue;
+				}
 
 				let Some(anchor_id) = point.get_anchor(&vector_data) else { continue };
 				if state.is_selected(ManipulatorPointId::Anchor(anchor_id)) {
@@ -797,39 +782,35 @@ impl ShapeState {
 				}
 
 				let Some(anchor_position) = vector_data.point_domain.position_from_id(anchor_id) else { continue };
+				let Some(mut handle_position) = point.get_position(&vector_data) else { continue };
+				handle_position += delta;
 
-				let Some(handle_position) = point.get_position(&vector_data) else { continue };
-				let handle_position = handle_position + delta;
+				let handle = point.as_handle().unwrap();
+				if let Some(other) = vector_data.other_colinear_handle(handle) {
+					if state.is_selected(other.to_manipulator_point()) {
+						responses.add(GraphOperationMessage::Vector {
+							layer,
+							modification_type: VectorModificationType::SetG1Continuous {
+								handles: [handle, other],
+								enabled: false,
+							},
+						});
+						continue;
+					}
 
-				let modification_type = handle.set_relative_position(handle_position - anchor_position);
-
-				responses.add(GraphOperationMessage::Vector { layer, modification_type });
-
-				let Some(other) = vector_data.other_colinear_handle(handle) else { continue };
-				if state.is_selected(other.to_manipulator_point()) {
-					// If two colinear handles are being dragged at the same time but not the anchor, it is necessary to break the colinear state.
-					let handles = [handle, other];
-					let modification_type = VectorModificationType::SetG1Continuous { handles, enabled: false };
-					responses.add(GraphOperationMessage::Vector { layer, modification_type });
-					continue;
-				}
-
-				let new_relative = if equidistant {
-					-(handle_position - anchor_position)
-				} else {
-					// TODO: Is this equivalent to `transform_to_document_space`? If changed, the before and after should be tested.
-					let transform = document.metadata().document_to_viewport.inverse() * transform_to_viewport_space;
 					let Some(other_position) = other.to_manipulator_point().get_position(&vector_data) else {
 						continue;
 					};
+					let transform = document.metadata().document_to_viewport.inverse() * delta_transform;
+					let length = opposing_handles.and_then(|h| h.get(&other)).copied().unwrap_or_else(|| (other_position - anchor_position).length());
 					let direction = transform.transform_vector2(handle_position - anchor_position).try_normalize();
-					let opposing_handle = opposing_handles.and_then(|handles| handles.get(&other));
-					let length = opposing_handle.copied().unwrap_or_else(|| transform.transform_vector2(other_position - anchor_position).length());
-					direction.map_or(other_position - anchor_position, |direction| transform.inverse().transform_vector2(-direction * length))
-				};
-				let modification_type = other.set_relative_position(new_relative);
+					let new_relative = direction.map_or(other_position - anchor_position, |dir| -dir * length);
 
-				responses.add(GraphOperationMessage::Vector { layer, modification_type });
+					responses.add(GraphOperationMessage::Vector {
+						layer,
+						modification_type: other.set_relative_position(transform.inverse().transform_vector2(new_relative)),
+					});
+				}
 			}
 		}
 	}
@@ -1119,7 +1100,7 @@ impl ShapeState {
 
 	// TODO Use quadtree or some equivalent spatial acceleration structure to improve this to O(log(n))
 	/// Find the closest manipulator, manipulator point, and distance so we can select path elements.
-	/// Brute force comparison to determine which manipulator (handle or anchor) we want to select taking O(n) time.
+	/// Brute force comparison to determine which manipulator (handle or anchor) we want to select takg inO(n) time.
 	/// Return value is an `Option` of the tuple representing `(ManipulatorPointId, distance squared)`.
 	fn closest_point_in_layer(network_interface: &NodeNetworkInterface, layer: LayerNodeIdentifier, pos: glam::DVec2) -> Option<(ManipulatorPointId, f64)> {
 		let mut closest_distance_squared: f64 = f64::MAX;

@@ -7,8 +7,7 @@ use crate::messages::portfolio::document::overlays::utility_types::OverlayContex
 use crate::messages::portfolio::document::utility_types::transformation::OriginalTransforms;
 use crate::messages::prelude::*;
 use crate::messages::tool::common_functionality::snapping::SnapTypeConfiguration;
-use js_sys::Date; /* TO BE REMOVED */
-
+//use js_sys::Date; /* TO BE REMOVED */
 use graphene_core::renderer::Quad;
 use graphene_std::renderer::Rect;
 
@@ -262,9 +261,7 @@ pub fn axis_align_drag(axis_align: bool, position: DVec2, start: DVec2) -> DVec2
 }
 
 /// Snaps a dragging event from the artboard or select tool
-// NOTE: This function is built with micro-optimization mindset, don't refactor it unless you know what you're doing
 pub fn snap_drag(start: DVec2, current: DVec2, axis_align: bool, snap_data: SnapData, snap_manager: &mut SnapManager, candidates: &[SnapCandidatePoint]) -> DVec2 {
-	let startt = Date::now();
 	let mouse_position = axis_align_drag(axis_align, snap_data.input.mouse.position, start);
 	let document = snap_data.document;
 	let inverse_transform = document.metadata().document_to_viewport.inverse();
@@ -308,8 +305,6 @@ pub fn snap_drag(start: DVec2, current: DVec2, axis_align: bool, snap_data: Snap
 			best_snap = snapped;
 		}
 	}
-	let end = Date::now();
-	trace!("{:?}", end - startt);
 	snap_manager.update_indicator(best_snap);
 
 	document.metadata().document_to_viewport.transform_vector2(offset)
