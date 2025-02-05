@@ -7,6 +7,7 @@ use crate::messages::portfolio::document::overlays::utility_types::OverlayContex
 use crate::messages::portfolio::document::utility_types::transformation::OriginalTransforms;
 use crate::messages::prelude::*;
 use crate::messages::tool::common_functionality::snapping::SnapTypeConfiguration;
+use js_sys::Date; /* TO BE REMOVED */
 
 use graphene_core::renderer::Quad;
 use graphene_std::renderer::Rect;
@@ -261,19 +262,29 @@ pub fn axis_align_drag(axis_align: bool, position: DVec2, start: DVec2) -> DVec2
 }
 
 /// Snaps a dragging event from the artboard or select tool
+// NOTE: This function is built with micro-optimization mindset, don't refactor it unless you know what you're doing
 pub fn snap_drag(start: DVec2, current: DVec2, axis_align: bool, snap_data: SnapData, snap_manager: &mut SnapManager, candidates: &[SnapCandidatePoint]) -> DVec2 {
+	let startt = Date::now();
 	let mouse_position = axis_align_drag(axis_align, snap_data.input.mouse.position, start);
 	let document = snap_data.document;
-	let total_mouse_delta_document = document.metadata().document_to_viewport.inverse().transform_vector2(mouse_position - start);
-	let mouse_delta_document = document.metadata().document_to_viewport.inverse().transform_vector2(mouse_position - current);
+	let inverse_transform = document.metadata().document_to_viewport.inverse();
+	let total_mouse_delta_document = inverse_transform.transform_vector2(mouse_position - start);
+	let mouse_delta_document = inverse_transform.transform_vector2(mouse_position - current);
 	let mut offset = mouse_delta_document;
-	let mut best_snap = SnappedPoint::infinite_snap(document.metadata().document_to_viewport.inverse().transform_point2(mouse_position));
+	let mut best_snap = SnappedPoint::infinite_snap(inverse_transform.transform_point2(mouse_position));
 
-	let bbox = Rect::point_iter(candidates.iter().map(|candidate| candidate.document_point + total_mouse_delta_document));
+	// NOTE: This snippet is built with micro-optimization mindset, don't refactor it unless you know what you're doing
+	let (min_x, max_x, min_y, max_y) = candidates
+		.iter()
+		.fold((f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY), |(min_x, max_x, min_y, max_y), candidate| {
+			let point: DVec2 = candidate.document_point + total_mouse_delta_document;
+			(min_x.min(point.x), max_x.max(point.x), min_y.min(point.y), max_y.max(point.y))
+		});
+	let bbox = Rect::from_box([DVec2::new(min_x, min_y), DVec2::new(max_x, max_y)]);
 
 	for (index, point) in candidates.iter().enumerate() {
 		let config = SnapTypeConfiguration {
-			bbox,
+			bbox: Some(bbox),
 			accept_distribution: true,
 			use_existing_candidates: index != 0,
 			..Default::default()
@@ -297,7 +308,8 @@ pub fn snap_drag(start: DVec2, current: DVec2, axis_align: bool, snap_data: Snap
 			best_snap = snapped;
 		}
 	}
-
+	let end = Date::now();
+	trace!("{:?}", end - startt);
 	snap_manager.update_indicator(best_snap);
 
 	document.metadata().document_to_viewport.transform_vector2(offset)

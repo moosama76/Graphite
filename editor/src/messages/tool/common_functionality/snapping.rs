@@ -10,14 +10,13 @@ use crate::messages::portfolio::document::overlays::utility_types::{OverlayConte
 use crate::messages::portfolio::document::utility_types::document_metadata::LayerNodeIdentifier;
 use crate::messages::portfolio::document::utility_types::misc::{GridSnapTarget, PathSnapTarget, SnapTarget};
 use crate::messages::prelude::*;
-
 use bezier_rs::TValue;
+use glam::{DAffine2, DVec2};
 use graphene_core::renderer::Quad;
 use graphene_core::vector::PointId;
 use graphene_std::renderer::Rect;
-
-use glam::{DAffine2, DVec2};
 use graphene_std::vector::NoHashBuilder;
+// use js_sys::Date; /* TO BE REMOVED */
 use std::cmp::Ordering;
 
 /// Configuration for the relevant snap type
@@ -305,31 +304,38 @@ impl SnapManager {
 
 	fn add_candidates(&mut self, layer: LayerNodeIdentifier, snap_data: &SnapData, quad: Quad) {
 		let document = snap_data.document;
+		let metadata = document.metadata();
 
-		if !document.network_interface.is_visible(&layer.to_node(), &[]) {
+		if !document.network_interface.is_visible(&layer.to_node(), &[]) || snap_data.ignore.contains(&layer) {
 			return;
 		}
-		if snap_data.ignore.contains(&layer) {
-			return;
-		}
-		if layer.has_children(document.metadata()) {
-			for layer in layer.children(document.metadata()) {
-				self.add_candidates(layer, snap_data, quad);
+
+		if layer.has_children(metadata) {
+			for child in layer.children(metadata) {
+				self.add_candidates(child, snap_data, quad);
 			}
 			return;
 		}
-		let Some(bounds) = document.metadata().bounding_box_with_transform(layer, DAffine2::IDENTITY) else {
+
+		let Some(bounds) = metadata.bounding_box_with_transform(layer, DAffine2::IDENTITY) else {
 			return;
 		};
-		let layer_bounds = document.metadata().transform_to_document(layer) * Quad::from_box(bounds);
-		let screen_bounds = document.metadata().document_to_viewport.inverse() * Quad::from_box([DVec2::ZERO, snap_data.input.viewport_bounds.size()]);
-		if screen_bounds.intersects(layer_bounds) {
-			if !self.alignment_candidates.as_ref().is_some_and(|candidates| candidates.len() > 100) {
-				self.alignment_candidates.get_or_insert_with(Vec::new).push(layer);
-			}
-			if quad.intersects(layer_bounds) && !self.candidates.as_ref().is_some_and(|candidates| candidates.len() > 10) {
-				self.candidates.get_or_insert_with(Vec::new).push(layer);
-			}
+
+		let layer_bounds = metadata.transform_to_document(layer) * Quad::from_box(bounds);
+		let screen_bounds = metadata.document_to_viewport.inverse() * Quad::from_box([DVec2::ZERO, snap_data.input.viewport_bounds.size()]);
+
+		if !screen_bounds.intersects(layer_bounds) {
+			return;
+		}
+
+		// Add the layer to alignment candidates if the limit is not exceeded
+		if self.alignment_candidates.as_ref().map_or(true, |candidates| candidates.len() <= 100) {
+			self.alignment_candidates.get_or_insert_with(Vec::new).push(layer);
+		}
+
+		// Add the layer to candidates if it intersects with the quad and the limit is not exceeded
+		if quad.intersects(layer_bounds) && self.candidates.as_ref().map_or(true, |candidates| candidates.len() <= 10) {
+			self.candidates.get_or_insert_with(Vec::new).push(layer);
 		}
 	}
 
