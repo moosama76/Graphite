@@ -174,65 +174,85 @@ impl LayerSnapper {
 		}
 		let document = snap_data.document;
 		self.points_to_snap.clear();
+		self.points_to_snap.reserve(crate::consts::MAX_LAYER_SNAP_POINTS);
 
+		// Combine both layer loops into one to reduce overhead
+		let mut layers_to_process = Vec::new();
+
+		// Collect artboard layers
 		for layer in document.metadata().all_layers() {
 			if !document.network_interface.is_artboard(&layer.to_node(), &[]) || snap_data.ignore.contains(&layer) {
 				continue;
 			}
-			if self.points_to_snap.len() >= crate::consts::MAX_LAYER_SNAP_POINTS {
-				warn!("Snap point overflow; skipping.");
-				return;
-			}
-
-			if document.snapping_state.target_enabled(SnapTarget::Artboard(ArtboardSnapTarget::CornerPoint)) {
-				let Some(bounds) = document
-					.network_interface
-					.document_metadata()
-					.bounding_box_with_transform(layer, document.metadata().transform_to_document(layer))
-				else {
-					continue;
-				};
-
-				get_bbox_points(Quad::from_box(bounds), &mut self.points_to_snap, BBoxSnapValues::ARTBOARD, document);
-			}
+			layers_to_process.push((layer, true)); // The 'true' flag indicates it's an artboard layer
 		}
-		for &layer in snap_data.get_candidates() {
-			get_layer_snap_points(layer, snap_data, &mut self.points_to_snap);
 
-			if snap_data.ignore_bounds(layer) {
-				continue;
+		// Collect candidate layers
+		for &layer in snap_data.get_candidates() {
+			layers_to_process.push((layer, false)); // The 'false' flag indicates it's a candidate layer
+		}
+
+		for &(layer, is_artboard) in &layers_to_process {
+			let mut points_to_snap_local = Vec::new();
+			let transform_to_document = document.metadata().transform_to_document(layer);
+
+			if is_artboard {
+				if document.snapping_state.target_enabled(SnapTarget::Artboard(ArtboardSnapTarget::CornerPoint)) {
+					if let Some(bounds) = document.network_interface.document_metadata().bounding_box_with_transform(layer, transform_to_document) {
+						get_bbox_points(Quad::from_box(bounds), &mut points_to_snap_local, BBoxSnapValues::ARTBOARD, document);
+					}
+				}
+			} else {
+				get_layer_snap_points(layer, snap_data, &mut points_to_snap_local);
+
+				if snap_data.ignore_bounds(layer) {
+					continue;
+				}
+				if let Some(bounds) = document.metadata().bounding_box_with_transform(layer, DAffine2::IDENTITY) {
+					let quad = transform_to_document * Quad::from_box(bounds);
+					let values = BBoxSnapValues::BOUNDING_BOX;
+					get_bbox_points(quad, &mut points_to_snap_local, values, document);
+				}
 			}
-			if self.points_to_snap.len() >= crate::consts::MAX_LAYER_SNAP_POINTS {
-				warn!("Snap point overflow; skipping.");
+
+			// Merge local points into the shared vector
+			if self.points_to_snap.len() + points_to_snap_local.len() >= crate::consts::MAX_LAYER_SNAP_POINTS {
+				warn!("Snap point overflow after adding points; stopping further processing.");
 				return;
 			}
-			let Some(bounds) = document.metadata().bounding_box_with_transform(layer, DAffine2::IDENTITY) else {
-				continue;
-			};
-			let quad = document.metadata().transform_to_document(layer) * Quad::from_box(bounds);
-			let values = BBoxSnapValues::BOUNDING_BOX;
-			get_bbox_points(quad, &mut self.points_to_snap, values, document);
+			self.points_to_snap.extend(points_to_snap_local);
 		}
 	}
 
 	pub fn snap_anchors(&mut self, snap_data: &mut SnapData, point: &SnapCandidatePoint, snap_results: &mut SnapResults, c: SnapConstraint, constrained_point: DVec2) {
-		let mut best = None;
+		let mut best: Option<SnappedPoint> = None;
+		let tolerance = snap_tolerance(snap_data.document);
+
 		for candidate in &self.points_to_snap {
-			// Candidate is not on constraint
+			// Skip candidates not on the constraint
 			if !candidate.document_point.abs_diff_eq(c.projection(candidate.document_point), 1e-5) {
 				continue;
 			}
-			let distance = candidate.document_point.distance(constrained_point);
-			let tolerance = snap_tolerance(snap_data.document);
 
-			let candidate_better = |best: &SnappedPoint| {
-				if best.snapped_point_document.abs_diff_eq(candidate.document_point, 1e-5) {
-					!candidate.target.bounding_box()
-				} else {
-					distance < best.distance
+			let distance = candidate.document_point.distance(constrained_point);
+
+			// Skip candidates outside the tolerance
+			if distance >= tolerance {
+				continue;
+			}
+
+			let is_better_candidate = match &best {
+				Some(best_ref) => {
+					if best_ref.snapped_point_document.abs_diff_eq(candidate.document_point, 1e-5) {
+						!candidate.target.bounding_box()
+					} else {
+						distance < best_ref.distance
+					}
 				}
+				None => true, // No best candidate yet
 			};
-			if distance < tolerance && (best.is_none() || best.as_ref().is_some_and(candidate_better)) {
+
+			if is_better_candidate {
 				best = Some(SnappedPoint {
 					snapped_point_document: candidate.document_point,
 					source: point.source,
@@ -246,6 +266,7 @@ impl LayerSnapper {
 				});
 			}
 		}
+
 		if let Some(result) = best {
 			snap_results.points.push(result);
 		}

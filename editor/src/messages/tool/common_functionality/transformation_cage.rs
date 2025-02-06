@@ -7,9 +7,9 @@ use crate::messages::portfolio::document::overlays::utility_types::OverlayContex
 use crate::messages::portfolio::document::utility_types::transformation::OriginalTransforms;
 use crate::messages::prelude::*;
 use crate::messages::tool::common_functionality::snapping::SnapTypeConfiguration;
-//use js_sys::Date; /* TO BE REMOVED */
 use graphene_core::renderer::Quad;
 use graphene_std::renderer::Rect;
+use js_sys::Date; /* TO BE REMOVED */
 
 use glam::{DAffine2, DVec2};
 
@@ -261,7 +261,9 @@ pub fn axis_align_drag(axis_align: bool, position: DVec2, start: DVec2) -> DVec2
 }
 
 /// Snaps a dragging event from the artboard or select tool
+// NOTE: This function is written with micro-optimization mindset, don't refactor it unless you know what you're doing
 pub fn snap_drag(start: DVec2, current: DVec2, axis_align: bool, snap_data: SnapData, snap_manager: &mut SnapManager, candidates: &[SnapCandidatePoint]) -> DVec2 {
+	let st = Date::now(); /* TO BE REMOVED */
 	let mouse_position = axis_align_drag(axis_align, snap_data.input.mouse.position, start);
 	let document = snap_data.document;
 	let inverse_transform = document.metadata().document_to_viewport.inverse();
@@ -270,7 +272,6 @@ pub fn snap_drag(start: DVec2, current: DVec2, axis_align: bool, snap_data: Snap
 	let mut offset = mouse_delta_document;
 	let mut best_snap = SnappedPoint::infinite_snap(inverse_transform.transform_point2(mouse_position));
 
-	// NOTE: This snippet is built with micro-optimization mindset, don't refactor it unless you know what you're doing
 	let (min_x, max_x, min_y, max_y) = candidates
 		.iter()
 		.fold((f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY), |(min_x, max_x, min_y, max_y), candidate| {
@@ -306,7 +307,8 @@ pub fn snap_drag(start: DVec2, current: DVec2, axis_align: bool, snap_data: Snap
 		}
 	}
 	snap_manager.update_indicator(best_snap);
-
+	let ed = Date::now();	/* TO BE REMOVED */
+	trace!("snap_drag: {}", ed - st); /* TO BE REMOVED */
 	document.metadata().document_to_viewport.transform_vector2(offset)
 }
 
