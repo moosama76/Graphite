@@ -51,16 +51,21 @@ impl AlignmentSnapper {
 	}
 
 	pub fn snap_bbox_points(&mut self, snap_data: &mut SnapData, point: &SnapCandidatePoint, snap_results: &mut SnapResults, constraint: SnapConstraint, config: SnapTypeConfiguration) {
-		self.collect_bounding_box_points(snap_data, !config.use_existing_candidates);
+		// Collect bounding box points if needed
+		if !config.use_existing_candidates {
+			self.collect_bounding_box_points(snap_data, true);
+		}
+
+		// Get unselected geometry if snapping target is enabled
 		let unselected_geometry = if snap_data.document.snapping_state.target_enabled(SnapTarget::Alignment(AlignmentSnapTarget::AlignWithAnchorPoint)) {
-			snap_data.node_snap_cache.map(|cache| cache.unselected.as_slice()).unwrap_or(&[])
+			snap_data.node_snap_cache.as_ref().map(|cache| cache.unselected.as_slice()).unwrap_or(&[])
 		} else {
 			&[]
 		};
 
 		// TODO: snap handle points
-		let document = snap_data.document;
-		let tolerance = snap_tolerance(document);
+		let tolerance = snap_tolerance(snap_data.document);
+		let tolerance_squared = tolerance * tolerance;
 
 		let mut snap_x: Option<SnappedPoint> = None;
 		let mut snap_y: Option<SnappedPoint> = None;
@@ -68,73 +73,84 @@ impl AlignmentSnapper {
 		for target_point in self.bounding_box_points.iter().chain(unselected_geometry) {
 			let target_position = target_point.document_point;
 
-			let [point_on_x, point_on_y] = if let SnapConstraint::Line { origin, direction } = constraint {
-				[
-					Quad::intersect_rays(target_point.document_point, DVec2::Y, origin, direction),
-					Quad::intersect_rays(target_point.document_point, DVec2::X, origin, direction),
-				]
-			} else {
-				let Some(quad) = target_point.quad.map(|quad| quad.0) else { continue };
-				let edges = [quad[1] - quad[0], quad[3] - quad[0]];
-				edges.map(|edge| edge.try_normalize().map(|edge| (point.document_point - target_position).project_onto(edge) + target_position))
-			};
+			let (point_on_x, point_on_y) = match constraint {
+				SnapConstraint::Line { origin, direction } => (
+					Quad::intersect_rays(target_position, DVec2::Y, origin, direction),
+					Quad::intersect_rays(target_position, DVec2::X, origin, direction),
+				),
+				_ => {
+					let Some(quad) = target_point.quad.map(|quad| quad.0) else { continue };
+					let edges = [quad[1] - quad[0], quad[3] - quad[0]];
 
-			let target_path = matches!(target_point.target, SnapTarget::Path(_));
-			let updated_target = if target_path {
-				SnapTarget::Alignment(AlignmentSnapTarget::AlignWithAnchorPoint)
-			} else {
-				target_point.target
-			};
+					let projections: [Option<DVec2>; 2] = edges.map(|edge| edge.try_normalize().map(|edge_norm| (point.document_point - target_position).project_onto(edge_norm) + target_position));
 
-			if let Some(point_on_x) = point_on_x {
-				let distance_to_snapped = point.document_point.distance(point_on_x);
-				let distance_to_align_target = point_on_x.distance(target_position);
-				if distance_to_snapped < tolerance && snap_x.as_ref().map_or(true, |point| distance_to_align_target < point.distance_to_align_target) {
-					snap_x = Some(SnappedPoint {
-						snapped_point_document: point_on_x,
-						source: point.source, // TODO(0Hypercube): map source
-						target: updated_target,
-						target_bounds: target_point.quad,
-						distance: distance_to_snapped,
-						tolerance,
-						distance_to_align_target,
-						alignment_target_x: Some(target_position),
-						fully_constrained: true,
-						at_intersection: matches!(constraint, SnapConstraint::Line { .. }),
-						..Default::default()
-					});
+					(projections[0], projections[1])
 				}
-			}
-			if let Some(point_on_y) = point_on_y {
-				let distance_to_snapped = point.document_point.distance(point_on_y);
-				let distance_to_align_target = point_on_y.distance(target_position);
-				if distance_to_snapped < tolerance && snap_y.as_ref().map_or(true, |point| distance_to_align_target < point.distance_to_align_target) {
-					snap_y = Some(SnappedPoint {
-						snapped_point_document: point_on_y,
-						source: point.source, // TODO(0Hypercube): map source
-						target: updated_target,
+			};
+
+			// Update snapping points along X and Y axes
+			for (axis, point_on_axis, snap_point) in [("x", point_on_x, &mut snap_x), ("y", point_on_y, &mut snap_y)] {
+				let Some(point_on_axis) = point_on_axis else { continue };
+
+				let distance_squared = point.document_point.distance_squared(point_on_axis);
+				if distance_squared >= tolerance_squared {
+					continue;
+				}
+
+				let distance_to_align_target_squared = point_on_axis.distance_squared(target_position);
+
+				let is_better = snap_point
+					.as_ref()
+					.map_or(true, |existing_snap| distance_to_align_target_squared < existing_snap.distance_to_align_target.powi(2));
+
+				if is_better {
+					let distance = distance_squared.sqrt();
+					let distance_to_align_target = distance_to_align_target_squared.sqrt();
+
+					let target = if matches!(target_point.target, SnapTarget::Path(_)) {
+						SnapTarget::Alignment(AlignmentSnapTarget::AlignWithAnchorPoint)
+					} else {
+						target_point.target
+					};
+
+					let mut new_snap_point = SnappedPoint {
+						snapped_point_document: point_on_axis,
+						source: point.source, // TODO: map source
+						target,
 						target_bounds: target_point.quad,
-						distance: distance_to_snapped,
+						distance,
 						tolerance,
 						distance_to_align_target,
-						alignment_target_y: Some(target_position),
 						fully_constrained: true,
 						at_intersection: matches!(constraint, SnapConstraint::Line { .. }),
 						..Default::default()
-					});
+					};
+
+					// Set alignment target for the corresponding axis
+					match axis {
+						"x" => new_snap_point.alignment_target_x = Some(target_position),
+						"y" => new_snap_point.alignment_target_y = Some(target_position),
+						_ => {}
+					}
+
+					*snap_point = Some(new_snap_point);
 				}
 			}
 		}
 
+		// Determine the final snapped point
 		match (snap_x, snap_y) {
 			(Some(snap_x), Some(snap_y)) if !matches!(constraint, SnapConstraint::Line { .. }) => {
 				let intersection = DVec2::new(snap_y.snapped_point_document.x, snap_x.snapped_point_document.y);
-				let distance = intersection.distance(point.document_point);
+				let distance_squared = point.document_point.distance_squared(intersection);
 
-				if distance >= tolerance {
-					snap_results.points.push(if snap_x.distance < snap_y.distance { snap_x } else { snap_y });
+				if distance_squared >= tolerance_squared {
+					let closer_snap = if snap_x.distance < snap_y.distance { snap_x } else { snap_y };
+					snap_results.points.push(closer_snap);
 					return;
 				}
+
+				let distance = distance_squared.sqrt();
 
 				snap_results.points.push(SnappedPoint {
 					snapped_point_document: intersection,
@@ -150,7 +166,10 @@ impl AlignmentSnapper {
 					..Default::default()
 				});
 			}
-			(Some(snap_x), Some(snap_y)) => snap_results.points.push(if snap_x.distance < snap_y.distance { snap_x } else { snap_y }),
+			(Some(snap_x), Some(snap_y)) => {
+				let closer_snap = if snap_x.distance < snap_y.distance { snap_x } else { snap_y };
+				snap_results.points.push(closer_snap);
+			}
 			(Some(snap_x), _) => snap_results.points.push(snap_x),
 			(_, Some(snap_y)) => snap_results.points.push(snap_y),
 			_ => {}
