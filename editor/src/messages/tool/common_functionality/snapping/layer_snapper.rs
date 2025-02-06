@@ -90,67 +90,121 @@ impl LayerSnapper {
 	}
 
 	pub fn free_snap_paths(&mut self, snap_data: &mut SnapData, point: &SnapCandidatePoint, snap_results: &mut SnapResults, config: SnapTypeConfiguration) {
-		self.collect_paths(snap_data, !config.use_existing_candidates);
+		if !config.use_existing_candidates {
+			self.collect_paths(snap_data, true);
+		}
 
 		let document = snap_data.document;
-		let normals = document.snapping_state.target_enabled(SnapTarget::Path(PathSnapTarget::NormalToPath));
-		let tangents = document.snapping_state.target_enabled(SnapTarget::Path(PathSnapTarget::TangentToPath));
+		let snapping_state = &document.snapping_state;
+
+		let normals_enabled = snapping_state.target_enabled(SnapTarget::Path(PathSnapTarget::NormalToPath));
+		let tangents_enabled = snapping_state.target_enabled(SnapTarget::Path(PathSnapTarget::TangentToPath));
+
 		let tolerance = snap_tolerance(document);
+		let tolerance_squared = tolerance * tolerance;
 
 		for path in &self.paths_to_snap {
-			// Skip very short paths
-			if path.document_curve.start.distance_squared(path.document_curve.end) < tolerance * tolerance * 2. {
+			let curve = &path.document_curve;
+
+			// Skip very short paths early
+			let start_to_end_dist_squared = curve.start.distance_squared(curve.end);
+			if start_to_end_dist_squared < tolerance_squared * 2.0 {
 				continue;
 			}
-			let time = path.document_curve.project(point.document_point);
-			let snapped_point_document = path.document_curve.evaluate(bezier_rs::TValue::Parametric(time));
 
-			let distance = snapped_point_document.distance(point.document_point);
+			let time = curve.project(point.document_point);
+			let snapped_point_document = curve.evaluate(bezier_rs::TValue::Parametric(time));
 
-			if distance < tolerance {
+			let distance_squared = snapped_point_document.distance_squared(point.document_point);
+
+			if distance_squared < tolerance_squared {
+				let snapped_point = SnappedPoint {
+					snapped_point_document,
+					target: path.target,
+					distance: distance_squared.sqrt(),
+					tolerance,
+					outline_layers: [path.bounds.is_none().then_some(path.layer), None],
+					source: point.source,
+					target_bounds: path.bounds,
+					..Default::default()
+				};
+
 				snap_results.curves.push(SnappedCurve {
 					layer: path.layer,
 					start: path.start,
-					document_curve: path.document_curve,
-					point: SnappedPoint {
-						snapped_point_document,
-						target: path.target,
-						distance,
-						tolerance,
-						outline_layers: [path.bounds.is_none().then_some(path.layer), None],
-						source: point.source,
-						target_bounds: path.bounds,
-						..Default::default()
-					},
+					document_curve: *curve,
+					point: snapped_point,
 				});
-				normals_and_tangents(path, normals, tangents, point, tolerance, snap_results);
+
+				if normals_enabled || tangents_enabled {
+					normals_and_tangents(path, normals_enabled, tangents_enabled, point, tolerance, snap_results);
+				}
 			}
 		}
 	}
 
+	fn expand_bounding_box(bounds: &[DVec2; 2], amount: f64) -> [DVec2; 2] {
+		[
+			bounds[0] - DVec2::splat(amount), // Min point expanded
+			bounds[1] + DVec2::splat(amount), // Max point expanded
+		]
+	}
+
+	fn bounding_boxes_intersect(bounds1: &[DVec2; 2], bounds2: &[DVec2; 2]) -> bool {
+		bounds1[0].x <= bounds2[1].x && bounds1[1].x >= bounds2[0].x && bounds1[0].y <= bounds2[1].y && bounds1[1].y >= bounds2[0].y
+	}
+
 	pub fn snap_paths_constrained(&mut self, snap_data: &mut SnapData, point: &SnapCandidatePoint, snap_results: &mut SnapResults, constraint: SnapConstraint, config: SnapTypeConfiguration) {
 		let document = snap_data.document;
-		self.collect_paths(snap_data, !config.use_existing_candidates);
+		if !config.use_existing_candidates {
+			self.collect_paths(snap_data, true);
+		}
 
 		let tolerance = snap_tolerance(document);
-		let constraint_path = if let SnapConstraint::Circle { center, radius } = constraint {
-			Subpath::new_ellipse(center - DVec2::splat(radius), center + DVec2::splat(radius))
-		} else {
-			let constrained_point = constraint.projection(point.document_point);
-			let direction = constraint.direction().normalize_or_zero();
-			let start = constrained_point - tolerance * direction;
-			let end = constrained_point + tolerance * direction;
-			Subpath::<PointId>::new_line(start, end)
+		let tolerance_squared = tolerance * tolerance;
+
+		let constraint_subpaths = match constraint {
+			SnapConstraint::Circle { center, radius } => Subpath::new_ellipse(center - DVec2::splat(radius), center + DVec2::splat(radius)),
+			_ => {
+				let constrained_point = constraint.projection(point.document_point);
+				let direction = constraint.direction().normalize_or_zero();
+				let start = constrained_point - tolerance * direction;
+				let end = constrained_point + tolerance * direction;
+				Subpath::<PointId>::new_line(start, end)
+			}
 		};
 
+		let constraint_segments: Vec<_> = constraint_subpaths.iter().collect();
+		let constraint_bounds: Vec<[DVec2; 2]> = constraint_segments.iter().map(|segment| segment.bounding_box()).collect();
+
 		for path in &self.paths_to_snap {
-			for constraint_path in constraint_path.iter() {
-				for time in path.document_curve.intersections(&constraint_path, None, None) {
+			let path_bounds = path.document_curve.bounding_box();
+			let mut intersects_constraint = false;
+			for constraint_bb in &constraint_bounds {
+				if Self::bounding_boxes_intersect(&Self::expand_bounding_box(&path_bounds, tolerance), &Self::expand_bounding_box(constraint_bb, tolerance)) {
+					intersects_constraint = true;
+					break;
+				}
+			}
+			if !intersects_constraint {
+				continue;
+			}
+
+			for (constraint_segment, constraint_bb) in constraint_segments.iter().zip(constraint_bounds.iter()) {
+				// Skip if bounding boxes do not intersect
+				if !Self::bounding_boxes_intersect(&Self::expand_bounding_box(&path_bounds, tolerance), &Self::expand_bounding_box(constraint_bb, tolerance)) {
+					continue;
+				}
+
+				// Compute intersections
+				let intersections = path.document_curve.intersections(constraint_segment, Some(tolerance), None);
+
+				for time in intersections {
 					let snapped_point_document = path.document_curve.evaluate(bezier_rs::TValue::Parametric(time));
+					let distance_squared = snapped_point_document.distance_squared(point.document_point);
 
-					let distance = snapped_point_document.distance(point.document_point);
-
-					if distance < tolerance {
+					if distance_squared < tolerance_squared {
+						let distance = distance_squared.sqrt();
 						snap_results.points.push(SnappedPoint {
 							snapped_point_document,
 							target: path.target,
@@ -162,6 +216,8 @@ impl LayerSnapper {
 							at_intersection: true,
 							..Default::default()
 						});
+
+						// TODO: break here? not sure
 					}
 				}
 			}
@@ -178,18 +234,15 @@ impl LayerSnapper {
 
 		// Combine both layer loops into one to reduce overhead
 		let mut layers_to_process = Vec::new();
-
-		// Collect artboard layers
 		for layer in document.metadata().all_layers() {
 			if !document.network_interface.is_artboard(&layer.to_node(), &[]) || snap_data.ignore.contains(&layer) {
 				continue;
 			}
-			layers_to_process.push((layer, true)); // The 'true' flag indicates it's an artboard layer
+			layers_to_process.push((layer, true)); // artboard layer
 		}
 
-		// Collect candidate layers
 		for &layer in snap_data.get_candidates() {
-			layers_to_process.push((layer, false)); // The 'false' flag indicates it's a candidate layer
+			layers_to_process.push((layer, false)); // candidate layer
 		}
 
 		for &(layer, is_artboard) in &layers_to_process {
@@ -229,14 +282,11 @@ impl LayerSnapper {
 		let tolerance = snap_tolerance(snap_data.document);
 
 		for candidate in &self.points_to_snap {
-			// Skip candidates not on the constraint
 			if !candidate.document_point.abs_diff_eq(c.projection(candidate.document_point), 1e-5) {
 				continue;
 			}
 
 			let distance = candidate.document_point.distance(constrained_point);
-
-			// Skip candidates outside the tolerance
 			if distance >= tolerance {
 				continue;
 			}

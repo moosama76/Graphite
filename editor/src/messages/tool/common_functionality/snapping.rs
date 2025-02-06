@@ -16,7 +16,6 @@ use graphene_core::renderer::Quad;
 use graphene_core::vector::PointId;
 use graphene_std::renderer::Rect;
 use graphene_std::vector::NoHashBuilder;
-// use js_sys::Date; /* TO BE REMOVED */
 use std::cmp::Ordering;
 
 /// Configuration for the relevant snap type
@@ -248,94 +247,102 @@ impl SnapManager {
 	}
 
 	fn find_best_snap(snap_data: &mut SnapData, point: &SnapCandidatePoint, snap_results: SnapResults, constrained: bool, off_screen: bool, to_path: bool) -> SnappedPoint {
-		let mut snapped_points = Vec::new();
 		let document = snap_data.document;
+		let viewport_bounds = snap_data.input.viewport_bounds.size();
+		let document_to_viewport = document.metadata().document_to_viewport;
+
+		let mut best_point: Option<SnappedPoint> = None;
+
+		// Helper closure to update the best point if the candidate is better
+		let mut consider_candidate = |candidate: SnappedPoint| {
+			if to_path {
+				if !matches!(candidate.target, SnapTarget::Path(_)) {
+					return;
+				}
+			}
+
+			// Check if the point is on-screen
+			let viewport_point = document_to_viewport.transform_point2(candidate.snapped_point_document);
+			let on_screen = viewport_point.cmpgt(DVec2::ZERO).all() && viewport_point.cmplt(viewport_bounds).all();
+			if !on_screen && !off_screen {
+				return;
+			}
+
+			if candidate.distance > candidate.tolerance {
+				return;
+			}
+
+			// Check if the candidate is better than the current best
+			if let Some(ref best) = best_point {
+				if candidate.other_snap_better(best) {
+					return;
+				}
+			}
+
+			best_point = Some(candidate);
+		};
 
 		if let Some(closest_point) = get_closest_point(snap_results.points) {
-			snapped_points.push(closest_point);
-		}
-		let exclude_paths = !document.snapping_state.target_enabled(SnapTarget::Path(PathSnapTarget::AlongPath));
-		if let Some(closest_curve) = get_closest_curve(&snap_results.curves, exclude_paths) {
-			snapped_points.push(closest_curve.clone());
+			consider_candidate(closest_point);
 		}
 
+		// Determine whether to exclude paths
+		let exclude_paths = !document.snapping_state.target_enabled(SnapTarget::Path(PathSnapTarget::AlongPath));
+
+		if let Some(closest_curve) = get_closest_curve(&snap_results.curves, exclude_paths) {
+			consider_candidate(closest_curve.clone());
+		}
+
+		// Consider the closest grid line
 		if document.snapping_state.target_enabled(SnapTarget::Grid(GridSnapTarget::Line)) {
 			if let Some(closest_line) = get_closest_line(&snap_results.grid_lines) {
-				snapped_points.push(closest_line.clone());
+				consider_candidate(closest_line.clone());
 			}
 		}
 
+		// If not constrained, consider intersections
 		if !constrained {
 			if document.snapping_state.target_enabled(SnapTarget::Path(PathSnapTarget::IntersectionPoint)) {
-				if let Some(closest_curves_intersection) = get_closest_intersection(point.document_point, &snap_results.curves) {
-					snapped_points.push(closest_curves_intersection);
+				if let Some(closest_intersection) = get_closest_intersection(point.document_point, &snap_results.curves) {
+					consider_candidate(closest_intersection);
 				}
 			}
 			if document.snapping_state.target_enabled(SnapTarget::Grid(GridSnapTarget::Intersection)) {
 				if let Some(closest_grid_intersection) = get_grid_intersection(point.document_point, &snap_results.grid_lines) {
-					snapped_points.push(closest_grid_intersection);
+					consider_candidate(closest_grid_intersection);
 				}
 			}
 		}
-
-		if to_path {
-			snapped_points.retain(|i| matches!(i.target, SnapTarget::Path(_)));
-		}
-
-		let mut best_point = None;
-
-		for point in snapped_points {
-			let viewport_point = document.metadata().document_to_viewport.transform_point2(point.snapped_point_document);
-			let on_screen = viewport_point.cmpgt(DVec2::ZERO).all() && viewport_point.cmplt(snap_data.input.viewport_bounds.size()).all();
-			if !on_screen && !off_screen {
-				continue;
-			}
-			if point.distance > point.tolerance {
-				continue;
-			}
-			if best_point.as_ref().is_some_and(|best: &SnappedPoint| point.other_snap_better(best)) {
-				continue;
-			}
-			best_point = Some(point);
-		}
-
-		best_point.unwrap_or(SnappedPoint::infinite_snap(point.document_point))
+		best_point.unwrap_or_else(|| SnappedPoint::infinite_snap(point.document_point))
 	}
 
 	fn add_candidates(&mut self, layer: LayerNodeIdentifier, snap_data: &SnapData, quad: Quad) {
 		let document = snap_data.document;
-		let metadata = document.metadata();
 
-		if !document.network_interface.is_visible(&layer.to_node(), &[]) || snap_data.ignore.contains(&layer) {
+		if !document.network_interface.is_visible(&layer.to_node(), &[]) {
 			return;
 		}
-
-		if layer.has_children(metadata) {
-			for child in layer.children(metadata) {
-				self.add_candidates(child, snap_data, quad);
+		if snap_data.ignore.contains(&layer) {
+			return;
+		}
+		if layer.has_children(document.metadata()) {
+			for layer in layer.children(document.metadata()) {
+				self.add_candidates(layer, snap_data, quad);
 			}
 			return;
 		}
-
-		let Some(bounds) = metadata.bounding_box_with_transform(layer, DAffine2::IDENTITY) else {
+		let Some(bounds) = document.metadata().bounding_box_with_transform(layer, DAffine2::IDENTITY) else {
 			return;
 		};
-
-		let layer_bounds = metadata.transform_to_document(layer) * Quad::from_box(bounds);
-		let screen_bounds = metadata.document_to_viewport.inverse() * Quad::from_box([DVec2::ZERO, snap_data.input.viewport_bounds.size()]);
-
-		if !screen_bounds.intersects(layer_bounds) {
-			return;
-		}
-
-		// Add the layer to alignment candidates if the limit is not exceeded
-		if self.alignment_candidates.as_ref().map_or(true, |candidates| candidates.len() <= 100) {
-			self.alignment_candidates.get_or_insert_with(Vec::new).push(layer);
-		}
-
-		// Add the layer to candidates if it intersects with the quad and the limit is not exceeded
-		if quad.intersects(layer_bounds) && self.candidates.as_ref().map_or(true, |candidates| candidates.len() <= 10) {
-			self.candidates.get_or_insert_with(Vec::new).push(layer);
+		let layer_bounds = document.metadata().transform_to_document(layer) * Quad::from_box(bounds);
+		let screen_bounds = document.metadata().document_to_viewport.inverse() * Quad::from_box([DVec2::ZERO, snap_data.input.viewport_bounds.size()]);
+		if screen_bounds.intersects(layer_bounds) {
+			if !self.alignment_candidates.as_ref().is_some_and(|candidates| candidates.len() > 100) {
+				self.alignment_candidates.get_or_insert_with(Vec::new).push(layer);
+			}
+			if quad.intersects(layer_bounds) && !self.candidates.as_ref().is_some_and(|candidates| candidates.len() > 10) {
+				self.candidates.get_or_insert_with(Vec::new).push(layer);
+			}
 		}
 	}
 

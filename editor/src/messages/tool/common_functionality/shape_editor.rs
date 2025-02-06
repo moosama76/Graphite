@@ -770,8 +770,6 @@ impl ShapeState {
 			let Some(vector_data) = document.network_interface.compute_modified_vector(layer) else { continue };
 
 			let opposing_handles = handle_lengths.as_ref().and_then(|handle_lengths| handle_lengths.get(&layer));
-
-			// Precompute transformations
 			let transform_to_viewport_space = document.metadata().transform_to_viewport(layer);
 			let transform_to_document_space = document.metadata().transform_to_document(layer);
 			let delta_transform = if in_viewport_space {
@@ -800,7 +798,6 @@ impl ShapeState {
 				let Some(anchor_position) = vector_data.point_domain.position_from_id(anchor_id) else { continue };
 				let Some(handle_position) = point.get_position(&vector_data) else { continue };
 
-				// Move the handle by delta
 				let handle_position = handle_position + delta;
 
 				let modification_type = handle.set_relative_position(handle_position - anchor_position);
@@ -820,14 +817,12 @@ impl ShapeState {
 				let new_relative = if equidistant {
 					-(handle_position - anchor_position)
 				} else {
-					// Simplified transformation using `transform_to_document_space`
 					let transform = transform_to_document_space;
 
 					let Some(other_position) = other.to_manipulator_point().get_position(&vector_data) else {
 						continue;
 					};
 
-					// Calculate the direction and length for the opposing handle
 					let direction = transform.transform_vector2(handle_position - anchor_position).try_normalize();
 					let opposing_handle_length = opposing_handles.and_then(|handles| handles.get(&other));
 
@@ -835,11 +830,9 @@ impl ShapeState {
 						.copied()
 						.unwrap_or_else(|| transform.transform_vector2(other_position - anchor_position).length());
 
-					// Compute the new relative position
 					direction.map_or(other_position - anchor_position, |dir| -dir * length)
 				};
 
-				// Apply the inverse transformation if necessary
 				let new_relative = if equidistant {
 					new_relative
 				} else {
