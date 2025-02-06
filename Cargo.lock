@@ -2493,7 +2493,6 @@ dependencies = [
  "once_cell",
  "serde",
  "serde_json",
- "smallvec",
  "specta",
  "spin",
  "thiserror 2.0.9",
